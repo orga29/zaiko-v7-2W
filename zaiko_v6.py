@@ -240,7 +240,7 @@ def create_categorized_inventory_excel(
 
 
 # --- Streamlit アプリケーション ---
-st.title("📦 在庫分類集計ツール")
+st.title("📦 在庫集計")
 
 # 1. 入力Excelファイル
 uploaded_file = st.file_uploader("1. 入力Excelファイル (在庫集計表を含むファイル)", type=["xlsx", "xlsm"])
