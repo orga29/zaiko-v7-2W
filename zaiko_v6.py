@@ -10,6 +10,7 @@ from copy import copy
 
 import streamlit as st  # --- 追加 ---
 import io               # --- 追加 ---
+from zoneinfo import ZoneInfo # --- ★修正: タイムゾーンライブラリをインポート ---
 
 
 def find_sheet(workbook, target_name):
@@ -119,10 +120,8 @@ def create_categorized_inventory_excel(
 
         # --- 出力ファイル名生成 ---
         output_file_name = f"在庫集計結果_{target_date.strftime('%Y%m%d')}.xlsx"
-        # 削除: output_dir, output_path
 
         # --- 出力先シート取得 (書式保持用) ---
-        # 変更: バッファのポインタを最初に戻して、再度読み込む
         input_file_buffer.seek(0) 
         wb_output = openpyxl.load_workbook(input_file_buffer, data_only=False)
         ws_box = find_sheet(wb_output, "在庫表（箱）")
@@ -184,7 +183,6 @@ def create_categorized_inventory_excel(
             template_top = template_cell.border.top
             template_bottom = template_cell.border.bottom
             
-            # 修正: "H" の文字を削除
             final_border = Border(
                 left=template_left,
                 right=thin,
@@ -221,10 +219,6 @@ def create_categorized_inventory_excel(
 
         hide_trailing_rows(ws_box, 3 + len(boxed) + 1)
         hide_trailing_rows(ws_small, 3 + len(smalls) + 1)
-
-        # --- 出力保存 ---
-        # 削除: os.path.exists, messagebox.askyesno, messagebox.showinfo
-        # 削除: wb_output.save(output_path)
         
         # --- 成功メッセージ構築 ---
         success_message = (
@@ -234,30 +228,29 @@ def create_categorized_inventory_excel(
             f"下のボタンからダウンロードしてください。"
         )
 
-        # --- メモリバッファに保存 --- (追加)
+        # --- メモリバッファに保存 ---
         output_buffer = io.BytesIO()
         wb_output.save(output_buffer)
         excel_data = output_buffer.getvalue()
 
-        # 変更: 成功時は (データ, ファイル名, メッセージ) のタプルを返す
         return (excel_data, output_file_name, success_message)
 
     except Exception as e:
         return f"予期せぬエラーが発生しました: {e}"
 
 
-# --- 削除: GUI部分 (InventoryApp クラス) ---
-
-
-# --- 追加: Streamlit アプリケーション ---
+# --- Streamlit アプリケーション ---
 st.title("📦 在庫分類集計ツール")
 
 # 1. 入力Excelファイル
 uploaded_file = st.file_uploader("1. 入力Excelファイル (在庫集計表を含むファイル)", type=["xlsx", "xlsm"])
 
 # 2. 集計基準日
-today = datetime.date.today()
-target_date = st.date_input("2. 集計基準日", value=today)
+# --- ★修正: 日本時間(JST)の現在日付を取得 ---
+JST = ZoneInfo("Asia/Tokyo")
+today_jp = datetime.datetime.now(JST).date()
+target_date = st.date_input("2. 集計基準日", value=today_jp) # valueを日本時間に
+# --- 修正ここまで ---
 
 # 3. 実行ボタン
 if st.button("集計してExcel生成"):
@@ -269,25 +262,18 @@ if st.button("集計してExcel生成"):
         date_str = target_date.strftime('%Y-%m-%d')
         
         with st.spinner("処理中... Excelファイルを生成しています。"):
-            # ファイルバッファを関数に渡す
             result = create_categorized_inventory_excel(uploaded_file, date_str)
 
         # 結果のハンドリング
         if isinstance(result, str):
-            # エラーの場合
             st.error(result)
         else:
-            # 成功の場合
             excel_data, file_name, success_message = result
-            
             st.success(success_message)
             
-            # ダウンロードボタンを表示
             st.download_button(
                 label="📁 集計結果をダウンロード",
                 data=excel_data,
                 file_name=file_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
-# --- 削除: if __name__ == "__main__": ---
