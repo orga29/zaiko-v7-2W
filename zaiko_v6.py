@@ -2,11 +2,14 @@ import openpyxl
 from openpyxl.utils import column_index_from_string
 from openpyxl.styles import Border, Side
 import datetime
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+# import tkinter as tk # --- 削除 ---
+# from tkinter import filedialog, messagebox, ttk # --- 削除 ---
 import os
 from copy import copy
-from tkcalendar import DateEntry  # カレンダーウィジェット
+# from tkcalendar import DateEntry # --- 削除 ---
+
+import streamlit as st  # --- 追加 ---
+import io               # --- 追加 ---
 
 
 def find_sheet(workbook, target_name):
@@ -18,9 +21,9 @@ def find_sheet(workbook, target_name):
 
 
 def create_categorized_inventory_excel(
-    input_file_path: str,
+    input_file_buffer,  # 変更: ファイルパス -> ファイルバッファ
     target_date_str: str
-) -> str:
+): # 変更: 戻り値の型が変わる (エラー時はstr, 成功時はTuple)
     """
     在庫集計ファイルから「箱もの」「こもの」を分類し、
     既存シート「在庫表（箱）」「在庫表（こもの）」に転記。
@@ -50,8 +53,9 @@ def create_categorized_inventory_excel(
 
         col_letter = ordered_columns_letters[ordered_days_jp.index(base_day_jp)]
 
-        # --- 入力ファイル読込 ---
-        wb_input = openpyxl.load_workbook(input_file_path, data_only=True)
+        # --- 入力ファイル読込 (データ取得用) ---
+        # 変更: ファイルパスからバッファを読み込む
+        wb_input = openpyxl.load_workbook(input_file_buffer, data_only=True)
         if input_sheet_name not in wb_input.sheetnames:
             return f"エラー: シート『{input_sheet_name}』が見つかりません。"
         ws_input = wb_input[input_sheet_name]
@@ -115,11 +119,12 @@ def create_categorized_inventory_excel(
 
         # --- 出力ファイル名生成 ---
         output_file_name = f"在庫集計結果_{target_date.strftime('%Y%m%d')}.xlsx"
-        output_dir = os.path.dirname(input_file_path)
-        output_path = os.path.join(output_dir, output_file_name)
+        # 削除: output_dir, output_path
 
-        # --- 出力先シート取得 ---
-        wb_output = openpyxl.load_workbook(input_file_path)
+        # --- 出力先シート取得 (書式保持用) ---
+        # 変更: バッファのポインタを最初に戻して、再度読み込む
+        input_file_buffer.seek(0) 
+        wb_output = openpyxl.load_workbook(input_file_buffer, data_only=False)
         ws_box = find_sheet(wb_output, "在庫表（箱）")
         ws_small = find_sheet(wb_output, "在庫表（こもの）")
 
@@ -179,7 +184,7 @@ def create_categorized_inventory_excel(
             template_top = template_cell.border.top
             template_bottom = template_cell.border.bottom
 
-            final_border = Border(
+H            final_border = Border(
                 left=template_left,
                 right=thin,
                 top=template_top,
@@ -217,120 +222,71 @@ def create_categorized_inventory_excel(
         hide_trailing_rows(ws_small, 3 + len(smalls) + 1)
 
         # --- 出力保存 ---
-        if os.path.exists(output_path):
-            result = messagebox.askyesno(
-                "上書き確認",
-                f"{os.path.basename(output_path)} は既に存在します。\n上書きしてもよろしいですか？"
-            )
-            if not result:
-                messagebox.showinfo("保存をキャンセルしました", "既存ファイルは変更されませんでした。")
-                return
+        # 削除: os.path.exists, messagebox.askyesno, messagebox.showinfo
+        # 削除: wb_output.save(output_path)
         
-        wb_output.save(output_path)
-        
-        return (
+        # --- 成功メッセージ構築 ---
+        success_message = (
             f"✅ 在庫集計が完了しました。\n"
             f"・箱もの：{len(boxed)}件\n"
             f"・こもの：{len(smalls)}件（▢優先ソート済み）\n\n"
-            f"保存先：{output_path}\n"
-            f"書式・フォントは保持し、空行・残データを除去済みです。"
+            f"下のボタンからダウンロードしてください。"
         )
+
+        # --- メモリバッファに保存 --- (追加)
+        output_buffer = io.BytesIO()
+        wb_output.save(output_buffer)
+        excel_data = output_buffer.getvalue()
+
+        # 変更: 成功時は (データ, ファイル名, メッセージ) のタプルを返す
+        return (excel_data, output_file_name, success_message)
 
     except Exception as e:
         return f"予期せぬエラーが発生しました: {e}"
 
 
-# --- GUI部分 ---
-class InventoryApp:
-    def __init__(self, master):
-        self.master = master
-        master.title("在庫分類集計ツール")
+# --- 削除: GUI部分 (InventoryApp クラス) ---
 
-        master.geometry("540x420")
-        master.minsize(520, 400)
 
-        master.update_idletasks()
-        width = 540
-        height = 420
-        x = (master.winfo_screenwidth() // 2) - (width // 2)
-        y = (master.winfo_screenheight() // 2) - (height // 2)
-        master.geometry(f"{width}x{height}+{x}+{y}")
+# --- 追加: Streamlit アプリケーション ---
+st.title("📦 在庫分類集計ツール")
 
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure('TFrame', background='#f0f0f0')
-        style.configure('TLabel', background='#f0f0f0', font=('Meiryo UI', 10))
-        style.configure('TButton', font=('Meiryo UI', 10, 'bold'))
+# 1. 入力Excelファイル
+uploaded_file = st.file_uploader("1. 入力Excelファイル (在庫集計表を含むファイル)", type=["xlsx", "xlsm"])
 
-        self.main_frame = ttk.Frame(master, padding="20")
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
+# 2. 集計基準日
+today = datetime.date.today()
+target_date = st.date_input("2. 集計基準日", value=today)
 
-        # --- 入力項目 ---
-        ttk.Label(self.main_frame, text="1. 入力Excelファイル:").grid(row=0, column=0, sticky="w", pady=5)
-        self.input_file_entry = ttk.Entry(self.main_frame, width=55)
-        self.input_file_entry.grid(row=0, column=1, padx=5)
-        ttk.Button(self.main_frame, text="参照", command=self.browse_file).grid(row=0, column=2, padx=5)
-
-        ttk.Label(self.main_frame, text="2. 集計基準日 (YYYY-MM-DD):").grid(row=1, column=0, sticky="w", pady=5)
+# 3. 実行ボタン
+if st.button("集計してExcel生成"):
+    if uploaded_file is None:
+        st.error("入力Excelファイルを選択してください。")
+    elif target_date is None:
+        st.error("集計基準日を選択してください。")
+    else:
+        date_str = target_date.strftime('%Y-%m-%d')
         
-        # --- 変更点: デフォルト日付を「当日」に戻す ---
-        today = datetime.date.today() 
-        
-        self.date_entry = DateEntry(
-            self.main_frame,
-            width=52,
-            locale='ja_JP',
-            date_pattern='y-mm-dd',
-            year=today.year,    # 変更
-            month=today.month,  # 変更
-            day=today.day,      # 変更
-            background='#f0f0f0',
-            foreground='black',
-            borderwidth=2,
-            font=('Meiryo UI', 10)
-        )
-        self.date_entry.grid(row=1, column=1, padx=5)
+        with st.spinner("処理中... Excelファイルを生成しています。"):
+            # ファイルバッファを関数に渡す
+            result = create_categorized_inventory_excel(uploaded_file, date_str)
 
-        # --- 実行ボタン ---
-        ttk.Button(self.main_frame, text="集計してExcel生成", command=self.run_processing).grid(
-            row=2, column=0, columnspan=3, pady=25
-        )
-
-        # --- 結果表示 ---
-        self.result_label = ttk.Label(self.main_frame, text="", wraplength=500, justify=tk.LEFT)
-        self.result_label.grid(row=3, column=0, columnspan=3, sticky="w")
-
-        self.main_frame.columnconfigure(1, weight=1)
-        self.main_frame.rowconfigure(3, weight=1)
-
-    def browse_file(self):
-        path = filedialog.askopenfilename(title="Excelファイルを選択", filetypes=[("Excel files", "*.xlsx *.xlsm")])
-        if path:
-            self.input_file_entry.delete(0, tk.END)
-            self.input_file_entry.insert(0, path)
-
-    def run_processing(self):
-        input_path = self.input_file_entry.get()
-        date_str = self.date_entry.get()
-
-        if not input_path or not date_str:
-            messagebox.showerror("エラー", "全ての項目を入力してください。")
-            return
-
-        self.result_label.config(text="処理中...", foreground="blue")
-        self.master.update_idletasks()
-
-        result = create_categorized_inventory_excel(input_path, date_str)
-
-        color = "red" if "エラー" in result else "green"
-        self.result_label.config(text=result, foreground=color)
-        
-        if "エラー" in result:
-            messagebox.showerror("処理結果", result)
+        # 結果のハンドリング
+        if isinstance(result, str):
+            # エラーの場合
+            st.error(result)
         else:
-            messagebox.showinfo("処理結果", result)
+            # 成功の場合
+            excel_data, file_name, success_message = result
+            
+            st.success(success_message)
+            
+            # ダウンロードボタンを表示
+            st.download_button(
+                label="📁 集計結果をダウンロード",
+                data=excel_data,
+                file_name=file_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = InventoryApp(root)
-    root.mainloop()
+# --- 削除: if __name__ == "__main__": ---
