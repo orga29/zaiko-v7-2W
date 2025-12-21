@@ -10,6 +10,7 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 import streamlit as st
 
+st.set_page_config(page_icon="📋")
 
 # ----------------------------
 # Utilities
