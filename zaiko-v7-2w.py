@@ -320,7 +320,7 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
 # ----------------------------
 # Streamlit UI
 # ----------------------------
-st.title("📦 在庫表出力（2週間ver対応）")
+st.title("📋在庫表（2週間対応版）")
 
 uploaded_file = st.file_uploader(
     "1. 入力Excelファイル（.xlsx / .xlsm）",
