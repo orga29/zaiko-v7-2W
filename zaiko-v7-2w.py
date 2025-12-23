@@ -12,7 +12,7 @@ import streamlit as st
 
 
 # ----------------------------
-# Utility
+# Utilities
 # ----------------------------
 def find_sheet_by_strip(workbook, target_name: str):
     t = target_name.strip()
@@ -41,9 +41,9 @@ def normalize_excel_cell_to_date(v):
 
 def resolve_honzan_col_letter_2w(ws_input, target_date: datetime.date) -> str:
     """
-    2週間ver（あなたの整理）：
-      - 在庫集計表 5行目 で target_date と一致する列を探す
-      - その列 + 8 が「本残」列
+    2週間ver（確定仕様）
+    - 在庫集計表の 5行目 で target_date と一致する列を探す
+    - その列 + 8 が「本残」列（=在庫表 C列：前夜本残）
     """
     DATE_ROW = 5
     HEADER_ROW = 7
@@ -61,7 +61,7 @@ def resolve_honzan_col_letter_2w(ws_input, target_date: datetime.date) -> str:
 
     honzan_col_idx = date_col_idx + 8
 
-    # 安全装置：+8先が本残列であること
+    # 安全装置：+8先が本残列か確認
     header_val = ws_input.cell(row=HEADER_ROW, column=honzan_col_idx).value
     header_str = "" if header_val is None else str(header_val)
     if "本残" not in header_str:
@@ -73,73 +73,40 @@ def resolve_honzan_col_letter_2w(ws_input, target_date: datetime.date) -> str:
     return get_column_letter(honzan_col_idx)
 
 
-def _iter_defined_name_items(wb):
+def remove_xlm_defined_names(wb: openpyxl.Workbook):
     """
-    wb.defined_names は name->DefinedName だったり name->list[DefinedName] だったりするので、
-    (name, DefinedName) の形で確実に列挙する。
+    Excel が「マクロ有効コンテンツ」と見なす定義名を除去する。
+    2週間テンプレに入っている _xleta.VLOOKUP (xlm=1) が主犯。
     """
+    # keys を先に固定
     for name in list(wb.defined_names):
-        obj = wb.defined_names[name]
-        if isinstance(obj, list):
-            for dn in obj:
-                yield name, dn
-        else:
-            yield name, obj
-
-
-def keep_only_target_sheets_and_cleanup(wb, keep_titles):
-    """
-    テンプレブックをそのまま使い（書式維持）、
-    保存直前に：
-      1) 指定2シート以外を削除
-      2) XLMマクロ系の定義名（xlm="1" / _xleta.*）を確実に削除
-      3) 削除したシート参照の定義名も削除
-    """
-    keep_norm = {t.strip() for t in keep_titles}
-
-    # 1) シート削除
-    for ws in list(wb.worksheets):
-        if ws.title.strip() not in keep_norm:
-            wb.remove(ws)
-
-    existing_titles = {ws.title for ws in wb.worksheets}
-
-    # 2) 定義名掃除（Excel 4.0 マクロ系を確実に除去）
-    #   - name が _xleta. で始まる
-    #   - DefinedName.xlm が True / "1" / 1
-    #   - 参照先シートが存在しない
-    to_delete = set()
-
-    for name, dn in _iter_defined_name_items(wb):
+        dn = wb.defined_names.get(name)
+        # dn が list の場合もあるが、今回のテンプレは単体なので単体前提でOK。
+        # 念のため list でも見る。
         try:
             if str(name).startswith("_xleta."):
-                to_delete.add(name)
+                wb.defined_names.pop(name, None)
                 continue
 
-            xlm_flag = getattr(dn, "xlm", None)
-            if xlm_flag in (True, "1", 1):
-                to_delete.add(name)
+            if isinstance(dn, list):
+                # どれか1つでも xlm=1 なら削除
+                if any(getattr(x, "xlm", None) in (True, "1", 1) for x in dn):
+                    wb.defined_names.pop(name, None)
                 continue
 
-            txt = getattr(dn, "attr_text", None)
-            if txt and "!" in txt:
-                left = txt.split("!")[0].strip()
-                if left.startswith("'") and left.endswith("'"):
-                    left = left[1:-1]
-                if left not in existing_titles:
-                    to_delete.add(name)
-                    continue
+            if getattr(dn, "xlm", None) in (True, "1", 1):
+                wb.defined_names.pop(name, None)
+                continue
         except Exception:
             # 変な定義名がいても落とさない
             continue
 
-    for name in to_delete:
-        try:
-            del wb.defined_names[name]
-        except Exception:
-            pass
 
-    # 3) active を残った先頭に
+def keep_only_two_sheets(wb: openpyxl.Workbook, keep_titles: set[str]):
+    keep_norm = {t.strip() for t in keep_titles}
+    for ws in list(wb.worksheets):
+        if ws.title.strip() not in keep_norm:
+            wb.remove(ws)
     if wb.worksheets:
         wb.active = 0
 
@@ -157,13 +124,10 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
     except ValueError as e:
         return f"エラー: {e}"
 
-    input_name = getattr(uploaded_file, "name", "") or ""
-    input_is_xlsm = input_name.lower().endswith(".xlsm")
-
     # 1) データ抽出用（data_only=True）
     try:
         uploaded_file.seek(0)
-        wb_input = openpyxl.load_workbook(uploaded_file, data_only=True)
+        wb_input = openpyxl.load_workbook(uploaded_file, data_only=True, keep_vba=False)
     except Exception as e:
         return f"エラー: 入力ファイルの読み込みに失敗しました: {e}"
 
@@ -185,8 +149,7 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
     ]
     exclusion_toichi = "東一"
 
-    boxed = []
-    smalls = []
+    boxed, smalls = [], []
 
     for r in range(HEADER_ROW + 1, ws_input.max_row + 1):
         code = ws_input.cell(row=r, column=column_index_from_string("A")).value
@@ -214,6 +177,7 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
         else:
             smalls.append(rec)
 
+    # ▢優先 → 商品コード昇順
     def sort_key(row):
         c, n, _ = row
         n_s = "" if n is None else str(n).strip()
@@ -222,7 +186,8 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
 
     smalls.sort(key=sort_key)
 
-    def compact_records(data):
+    # 保険：完全空行を落とす
+    def compact(data):
         out = []
         for c, n, v in data:
             c_s = "" if c is None else str(c).strip()
@@ -232,14 +197,14 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
             out.append([c, n, v])
         return out
 
-    boxed = compact_records(boxed)
-    smalls = compact_records(smalls)
+    boxed = compact(boxed)
+    smalls = compact(smalls)
 
-    # 2) テンプレ書き込み用（data_only=False）
-    #    xlsm入力なら keep_vba=True で読み込む（最も壊れにくい）
+    # 2) 書き込み用（data_only=False）
+    # ★ここが重要：keep_vba=False で読み直す（= xlsm要素を持ち出さない）
     try:
         uploaded_file.seek(0)
-        wb_output = openpyxl.load_workbook(uploaded_file, data_only=False, keep_vba=input_is_xlsm)
+        wb_output = openpyxl.load_workbook(uploaded_file, data_only=False, keep_vba=False)
     except Exception as e:
         return f"エラー: 出力用にテンプレートを読み込めませんでした: {e}"
 
@@ -248,6 +213,7 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
     if ws_box is None or ws_small is None:
         return f"エラー: 出力先シート『{OUT_BOX}』『{OUT_SMALL}』が見つかりません。"
 
+    # 既存データクリア
     def clear_existing_data(ws):
         max_clear_row = max(ws.max_row, 2000)
         for rr in range(3, max_clear_row + 1):
@@ -257,6 +223,7 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
                 if cc <= 3:
                     cell.font = Font(name="ＭＳ Ｐゴシック", size=26)
 
+    # テンプレ行（3行目）で書式維持しながら転記
     def write(ws, data):
         clear_existing_data(ws)
 
@@ -278,19 +245,16 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
                 dst.protection = copy(src.protection)
                 dst.alignment = copy(src.alignment)
 
+                # B列 shrink_to_fit 強制
                 if col_idx == 2:
                     a = src.alignment
                     dst.alignment = Alignment(
                         horizontal=a.horizontal,
                         vertical=a.vertical,
-                        text_rotation=a.text_rotation,
                         wrap_text=a.wrap_text,
                         shrink_to_fit=True,
-                        indent=a.indent,
-                        relative_indent=a.relative_indent,
-                        justify_last_line=a.justify_last_line,
-                        reading_order=a.reading_order,
                     )
+
             ws.row_dimensions[rr].height = template_height
 
     def reset_print_area(ws, last_row):
@@ -330,13 +294,14 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
     hide_trailing_rows(ws_box, 3 + len(boxed) + 1)
     hide_trailing_rows(ws_small, 3 + len(smalls) + 1)
 
-    # ★保存直前：2シートだけ残す + XLMマクロ定義名を確実に除去
-    keep_only_target_sheets_and_cleanup(wb_output, {OUT_BOX, OUT_SMALL})
+    # ★ここが主犯対策：定義名のXLMマクロ要素を削除
+    remove_xlm_defined_names(wb_output)
 
-    # 出力は「開ける確率最優先」：xlsm入力ならxlsm出力（拡張子不一致の警告を回避）
-    out_ext = ".xlsm" if input_is_xlsm else ".xlsx"
-    out_name = f"在庫集計結果_{target_date.strftime('%Y%m%d')}{out_ext}"
+    # ★2シート以外を落とす（必要なら）
+    keep_only_two_sheets(wb_output, {OUT_BOX, OUT_SMALL})
 
+    # 保存（xlsxで出す：ここまででマクロ扱い要素を落としている）
+    out_name = f"在庫集計結果_{target_date.strftime('%Y%m%d')}.xlsx"
     out_buf = io.BytesIO()
     try:
         wb_output.save(out_buf)
@@ -349,7 +314,7 @@ def create_categorized_inventory_excel(uploaded_file, target_date_str: str):
         f"・箱もの：{len(boxed)}件\n"
         f"・こもの：{len(smalls)}件（▢優先ソート済み）\n"
     )
-    return excel_data, out_name, msg, input_is_xlsm
+    return excel_data, out_name, msg
 
 
 # ----------------------------
@@ -364,7 +329,7 @@ uploaded_file = st.file_uploader(
 
 JST = ZoneInfo("Asia/Tokyo")
 today_jp = datetime.datetime.now(JST).date()
-target_date = st.date_input("2. 集計基準日（デフォルト＝本日）", value=today_jp)
+target_date = st.date_input("2. 在庫集計日", value=today_jp)
 
 if st.button("集計してExcel生成", key="generate_excel"):
     if uploaded_file is None:
@@ -377,17 +342,11 @@ if st.button("集計してExcel生成", key="generate_excel"):
         if isinstance(result, str):
             st.error(result)
         else:
-            excel_data, file_name, msg, is_xlsm = result
+            excel_data, file_name, msg = result
             st.success(msg)
-
-            mime = (
-                "application/vnd.ms-excel.sheet.macroEnabled.12"
-                if is_xlsm
-                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
             st.download_button(
                 label="📁 集計結果をダウンロード",
                 data=excel_data,
                 file_name=file_name,
-                mime=mime,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
